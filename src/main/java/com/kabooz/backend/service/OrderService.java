@@ -497,6 +497,14 @@ public class OrderService {
                 .subtract(order.getReceivedAmount())
                 .max(BigDecimal.ZERO);
 
+        // Safely get item count — avoids LazyInitializationException when items are not fetched
+        int itemCount = 0;
+        try {
+            itemCount = order.getItems().size();
+        } catch (Exception ignored) {
+            // items not loaded in this query context — count stays 0
+        }
+
         return OrderSummaryResponse.builder()
                 .id(order.getId())
                 .invoiceNo(order.getInvoiceNo())
@@ -510,7 +518,7 @@ public class OrderService {
                 .status(order.getStatus().name())
                 .withGst(Boolean.TRUE.equals(order.getWithGst()))
                 .gstNumber(order.getGstNumber())
-                .itemCount(order.getItems().size())
+                .itemCount(itemCount)
                 .createdAt(order.getCreatedAt())
                 .build();
     }

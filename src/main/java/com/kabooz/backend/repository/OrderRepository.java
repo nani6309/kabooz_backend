@@ -4,6 +4,7 @@ import com.kabooz.backend.entity.Order;
 import com.kabooz.backend.entity.Order.OrderStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -30,9 +31,19 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
      * @param pageable pagination/sorting parameters
      * @return page of matching orders
      */
-    @Query("""
+    @Query(value = """
             SELECT o FROM Order o
-            JOIN FETCH o.customer c
+            JOIN o.customer c
+            WHERE o.deletedAt IS NULL
+              AND (:status IS NULL OR o.status = :status)
+              AND (:search IS NULL OR :search = ''
+                    OR LOWER(c.name) LIKE LOWER(CONCAT('%', :search, '%'))
+                    OR c.mobile LIKE CONCAT('%', :search, '%')
+                    OR LOWER(o.invoiceNo) LIKE LOWER(CONCAT('%', :search, '%')))
+            """,
+            countQuery = """
+            SELECT COUNT(o) FROM Order o
+            JOIN o.customer c
             WHERE o.deletedAt IS NULL
               AND (:status IS NULL OR o.status = :status)
               AND (:search IS NULL OR :search = ''
@@ -40,6 +51,7 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
                     OR c.mobile LIKE CONCAT('%', :search, '%')
                     OR LOWER(o.invoiceNo) LIKE LOWER(CONCAT('%', :search, '%')))
             """)
+    @EntityGraph(attributePaths = {"customer"})
     Page<Order> findAllActive(
             @Param("status") OrderStatus status,
             @Param("search") String search,
