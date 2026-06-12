@@ -24,16 +24,15 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
 
     /**
      * List active orders with optional status and search filters.
-     * Search matches customer name, mobile or invoice number (case-insensitive).
      *
-     * @param status   order status filter; null means all statuses
+     * @param status   order status; null means all statuses
      * @param search   free-text search term; null means no search filter
      * @param pageable pagination/sorting parameters
      * @return page of matching orders
      */
     @Query(value = """
             SELECT o FROM Order o
-            JOIN o.customer c
+            JOIN FETCH o.customer c
             WHERE o.deletedAt IS NULL
               AND (:status IS NULL OR o.status = :status)
               AND (:search IS NULL OR :search = ''
@@ -51,7 +50,6 @@ public interface OrderRepository extends JpaRepository<Order, Long> {
                     OR c.mobile LIKE CONCAT('%', :search, '%')
                     OR LOWER(o.invoiceNo) LIKE LOWER(CONCAT('%', :search, '%')))
             """)
-    @EntityGraph(attributePaths = {"customer"})
     Page<Order> findAllActive(
             @Param("status") OrderStatus status,
             @Param("search") String search,

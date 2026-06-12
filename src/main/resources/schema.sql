@@ -34,17 +34,7 @@ CREATE INDEX IF NOT EXISTS idx_customer_mobile ON customers (mobile);
 -- ----------------------------------------------------------------
 -- 3. orders
 -- ----------------------------------------------------------------
-DO $$ BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'order_status') THEN
-        CREATE TYPE order_status AS ENUM ('PENDING', 'PAID', 'OVERDUE');
-    END IF;
-END $$;
-
-DO $$ BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'order_source') THEN
-        CREATE TYPE order_source AS ENUM ('HOMEPAGE', 'ADMIN');
-    END IF;
-END $$;
+-- (Custom enum types order_status and order_source removed for JPA compatibility)
 
 CREATE TABLE IF NOT EXISTS orders (
     id                  BIGSERIAL       PRIMARY KEY,
@@ -60,9 +50,9 @@ CREATE TABLE IF NOT EXISTS orders (
     with_gst            BOOLEAN         NOT NULL DEFAULT FALSE,
     gst_number          VARCHAR(15)     NULL,
     customer_shop_name  VARCHAR(160)    NULL,
-    status              order_status    NOT NULL DEFAULT 'PENDING',
+    status              VARCHAR(20)     NOT NULL DEFAULT 'PENDING',
     notes               TEXT,
-    source              order_source    NOT NULL DEFAULT 'HOMEPAGE',
+    source              VARCHAR(20)     NOT NULL DEFAULT 'HOMEPAGE',
     deleted_at          TIMESTAMP       NULL,
     created_at          TIMESTAMP       NOT NULL DEFAULT NOW()
 );
@@ -74,16 +64,12 @@ CREATE INDEX IF NOT EXISTS idx_order_deleted  ON orders (deleted_at);
 -- ----------------------------------------------------------------
 -- 4. order_items
 -- ----------------------------------------------------------------
-DO $$ BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'bottle_type') THEN
-        CREATE TYPE bottle_type AS ENUM ('GLASS', 'PET');
-    END IF;
-END $$;
+-- (Custom enum type bottle_type removed for JPA compatibility)
 
 CREATE TABLE IF NOT EXISTS order_items (
     id                  BIGSERIAL       PRIMARY KEY,
     order_id            BIGINT          NOT NULL REFERENCES orders (id) ON DELETE CASCADE,
-    bottle_type         bottle_type     NOT NULL,
+    bottle_type         VARCHAR(10)     NOT NULL,
     flavor              VARCHAR(100)    NOT NULL,
     price_per_bottle    INT             NOT NULL,
     quantity            INT             NOT NULL,
