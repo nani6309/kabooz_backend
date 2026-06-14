@@ -1,6 +1,7 @@
 package com.kabooz.backend.controller;
 
 import com.kabooz.backend.dto.request.AdminOrderRequest;
+import com.kabooz.backend.dto.request.RejectOrderRequest;
 import com.kabooz.backend.dto.request.UpdateOrderGstRequest;
 import com.kabooz.backend.dto.request.UpdateOrderStatusRequest;
 import com.kabooz.backend.dto.response.DashboardStatsResponse;
@@ -27,13 +28,16 @@ import java.io.IOException;
  * All endpoints require a valid JWT with ROLE_ADMIN (enforced by SecurityConfig).
  *
  * <ul>
- *   <li>GET    /api/admin/dashboard           — dashboard stats</li>
- *   <li>GET    /api/admin/orders              — paginated order list</li>
- *   <li>GET    /api/admin/orders/{id}         — full order detail</li>
- *   <li>POST   /api/admin/orders              — create order</li>
- *   <li>PUT    /api/admin/orders/{id}/status  — update status + payment</li>
- *   <li>DELETE /api/admin/orders/{id}         — soft delete</li>
- *   <li>GET    /api/admin/orders/{id}/invoice/pdf — download PDF</li>
+ *   <li>GET    /api/admin/dashboard                     — dashboard stats</li>
+ *   <li>GET    /api/admin/orders                        — paginated order list (supports reviewStatus filter)</li>
+ *   <li>GET    /api/admin/orders/{id}                   — full order detail</li>
+ *   <li>POST   /api/admin/orders                        — create order (PENDING_REVIEW)</li>
+ *   <li>POST   /api/admin/orders/{id}/accept            — accept order → assign invoice</li>
+ *   <li>POST   /api/admin/orders/{id}/reject            — reject order</li>
+ *   <li>PUT    /api/admin/orders/{id}/status            — update payment status</li>
+ *   <li>PATCH  /api/admin/orders/{id}/gst              — update GSTIN</li>
+ *   <li>DELETE /api/admin/orders/{id}                   — soft delete</li>
+ *   <li>GET    /api/admin/orders/{id}/invoice/pdf       — download PDF</li>
  * </ul>
  */
 @RestController
@@ -51,7 +55,7 @@ public class AdminController {
     /**
      * Retrieve aggregated dashboard statistics.
      *
-     * @return 200 with totals for orders, revenue, and monthly figures
+     * @return 200 with totals for orders, revenue, monthly figures, and pending-review count
      */
     @GetMapping("/dashboard")
     public ResponseEntity<DashboardStatsResponse> getDashboard() {
@@ -64,10 +68,11 @@ public class AdminController {
     /**
      * List all non-deleted orders with optional filtering and pagination.
      *
-     * @param page   0-based page number (default 0)
-     * @param size   page size (default 20)
-     * @param status filter by status: all | PENDING | PAID | OVERDUE (default "all")
-     * @param search free-text search on customer name, mobile, or invoice number
+     * @param page         0-based page number (default 0)
+     * @param size         page size (default 20)
+     * @param status       payment status filter: all | PENDING | PAID | OVERDUE (default "all")
+     * @param reviewStatus review status filter: all | PENDING_REVIEW | ACCEPTED | REJECTED (default "all")
+     * @param search       free-text search on customer name, mobile, or invoice number
      * @return paginated page of order summaries
      */
     @GetMapping("/orders")
@@ -75,10 +80,12 @@ public class AdminController {
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size,
             @RequestParam(defaultValue = "all") String status,
+            @RequestParam(defaultValue = "all") String reviewStatus,
             @RequestParam(required = false) String search) {
 
-        log.debug("Admin list orders: page={} size={} status={} search={}", page, size, status, search);
-        return ResponseEntity.ok(orderService.listOrders(page, size, status, search));
+        log.debug("Admin list orders: page={} size={} status={} reviewStatus={} search={}",
+                page, size, status, reviewStatus, search);
+        return ResponseEntity.ok(orderService.listOrders(page, size, status, reviewStatus, search));
     }
 
     // ── Single order ───────────────────────────────────────────────────────
@@ -99,15 +106,49 @@ public class AdminController {
 
     /**
      * Create a new order from the admin panel.
-     * Admin may set any price per bottle and supply a received amount.
+     * The order is created with reviewStatus=PENDING_REVIEW and no invoice number.
+     * Admin must call /accept to assign an invoice and finalise.
      *
      * @param req validated admin order request
-     * @return 201 Created with full OrderResponse
+     * @return 201 Created with OrderResponse (reviewStatus=PENDING_REVIEW, invoiceNo=null)
      */
     @PostMapping("/orders")
     public ResponseEntity<OrderResponse> createOrder(@Valid @RequestBody AdminOrderRequest req) {
         log.info("Admin creating order for mobile={}", req.getCustomer().getMobile());
         return ResponseEntity.status(HttpStatus.CREATED).body(orderService.createAdminOrder(req));
+    }
+
+    // ── Accept order ───────────────────────────────────────────────────────
+
+    /**
+     * Accept a pending-review order.
+     * Assigns an invoice number and transitions reviewStatus to ACCEPTED.
+     *
+     * @param id the order ID
+     * @return 200 with updated OrderResponse (reviewStatus=ACCEPTED, invoiceNo set)
+     */
+    @PostMapping("/orders/{id}/accept")
+    public ResponseEntity<OrderResponse> acceptOrder(@PathVariable Long id) {
+        log.info("Admin accepting order id={}", id);
+        return ResponseEntity.ok(orderService.acceptOrder(id));
+    }
+
+    // ── Reject order ───────────────────────────────────────────────────────
+
+    /**
+     * Reject a pending-review order with an optional reason.
+     *
+     * @param id  the order ID
+     * @param req rejection request (reason is optional)
+     * @return 200 with updated OrderResponse (reviewStatus=REJECTED, invoiceNo=null)
+     */
+    @PostMapping("/orders/{id}/reject")
+    public ResponseEntity<OrderResponse> rejectOrder(
+            @PathVariable Long id,
+            @Valid @RequestBody(required = false) RejectOrderRequest req) {
+        log.info("Admin rejecting order id={}", id);
+        String reason = (req != null) ? req.getReason() : null;
+        return ResponseEntity.ok(orderService.rejectOrder(id, reason));
     }
 
     // ── Update status ──────────────────────────────────────────────────────
@@ -167,6 +208,7 @@ public class AdminController {
 
     /**
      * Generate and stream a PDF invoice for the given order.
+     * Only valid for ACCEPTED orders (those with an invoiceNo).
      * The response is streamed as an attachment for immediate download.
      *
      * @param id the order ID
@@ -178,6 +220,10 @@ public class AdminController {
         log.info("PDF invoice requested for order id={}", id);
 
         OrderResponse orderDto = orderService.getOrderById(id);
+
+        if (orderDto.getInvoiceNo() == null) {
+            return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).build();
+        }
 
         // Load the full entity for PDF generation (we need the entity for InvoiceService)
         // Re-fetch the Order entity through the service
@@ -230,6 +276,7 @@ public class AdminController {
                 .gstNumber(dto.getGstNumber())
                 .status(Order.OrderStatus.valueOf(dto.getStatus()))
                 .source(Order.OrderSource.valueOf(dto.getSource()))
+                .reviewStatus(Order.ReviewStatus.valueOf(dto.getReviewStatus()))
                 .notes(dto.getNotes())
                 .createdAt(dto.getCreatedAt())
                 .build();

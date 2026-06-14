@@ -11,7 +11,8 @@ import java.time.LocalDateTime;
 
 /**
  * Compact order summary for list/pagination views.
- * Used in GET /api/admin/orders paginated responses.
+ * Used in GET /api/admin/orders paginated responses including
+ * pending-review and rejected order lists.
  */
 @Data
 @Builder
@@ -33,4 +34,10 @@ public class OrderSummaryResponse {
     private String gstNumber;
     private int itemCount;
     private LocalDateTime createdAt;
+
+    /** Review workflow status: PENDING_REVIEW | ACCEPTED | REJECTED */
+    private String reviewStatus;
+
+    /** Set when reviewStatus = REJECTED */
+    private String rejectionReason;
 }

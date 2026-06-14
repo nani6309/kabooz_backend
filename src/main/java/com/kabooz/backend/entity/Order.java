@@ -16,6 +16,10 @@ import java.util.List;
  * Tax breakdown: CGST 20% + SGST 20% = 40% total (tax-inclusive pricing).
  * All prices stored as tax-exclusive (taxable) + separate tax columns.
  * </p>
+ * <p>
+ * Review workflow: orders start as PENDING_REVIEW, then admin accepts (→ ACCEPTED,
+ * invoice number assigned) or rejects (→ REJECTED, no invoice created).
+ * </p>
  */
 @Entity
 @Table(name = "orders")
@@ -30,7 +34,8 @@ public class Order {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "invoice_no", nullable = false, unique = true, length = 20)
+    /** Null until the order is accepted by admin. */
+    @Column(name = "invoice_no", unique = true, length = 20)
     private String invoiceNo;
 
     @Column(name = "invoice_date", nullable = false)
@@ -91,6 +96,19 @@ public class Order {
     @Builder.Default
     private OrderSource source = OrderSource.HOMEPAGE;
 
+    /**
+     * Review workflow status.
+     * Orders start as PENDING_REVIEW; admin then accepts (invoice assigned) or rejects.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "review_status", nullable = false, length = 20)
+    @Builder.Default
+    private ReviewStatus reviewStatus = ReviewStatus.PENDING_REVIEW;
+
+    /** Optional reason provided by admin when rejecting an order. */
+    @Column(name = "rejection_reason", columnDefinition = "TEXT")
+    private String rejectionReason;
+
     /** Soft-delete timestamp. Non-null means logically deleted. */
     @Column(name = "deleted_at")
     private LocalDateTime deletedAt;
@@ -123,5 +141,9 @@ public class Order {
 
     public enum OrderSource {
         HOMEPAGE, ADMIN
+    }
+
+    public enum ReviewStatus {
+        PENDING_REVIEW, ACCEPTED, REJECTED
     }
 }

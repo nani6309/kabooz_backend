@@ -23,4 +23,7 @@ public class DashboardStatsResponse {
     private long overdueCount;
     private long thisMonthOrders;
     private BigDecimal thisMonthRevenue;
+
+    /** Number of orders waiting for admin accept/reject (PENDING_REVIEW). */
+    private long pendingReviewCount;
 }

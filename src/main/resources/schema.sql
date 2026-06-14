@@ -137,3 +137,44 @@ BEGIN
         ALTER TABLE orders ADD COLUMN customer_shop_name VARCHAR(160) NULL;
     END IF;
 END $$;
+
+-- ----------------------------------------------------------------
+-- 8. Review workflow columns (safe to re-run)
+-- ----------------------------------------------------------------
+-- Make invoice_no nullable (invoice assigned only after order is accepted)
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'orders' AND column_name = 'invoice_no'
+          AND is_nullable = 'NO'
+    ) THEN
+        ALTER TABLE orders ALTER COLUMN invoice_no DROP NOT NULL;
+    END IF;
+END $$;
+
+-- Add review_status column if missing
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'orders' AND column_name = 'review_status'
+    ) THEN
+        ALTER TABLE orders ADD COLUMN review_status VARCHAR(20) NOT NULL DEFAULT 'ACCEPTED';
+        -- Default existing rows to ACCEPTED so they are treated as finalised invoices
+    END IF;
+END $$;
+
+-- Add rejection_reason column if missing
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'orders' AND column_name = 'rejection_reason'
+    ) THEN
+        ALTER TABLE orders ADD COLUMN rejection_reason TEXT NULL;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_order_review_status ON orders (review_status);
+

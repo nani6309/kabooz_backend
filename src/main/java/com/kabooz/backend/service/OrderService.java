@@ -11,6 +11,7 @@ import com.kabooz.backend.dto.response.PlaceOrderResponse;
 import com.kabooz.backend.entity.*;
 import com.kabooz.backend.entity.Order.OrderSource;
 import com.kabooz.backend.entity.Order.OrderStatus;
+import com.kabooz.backend.entity.Order.ReviewStatus;
 import com.kabooz.backend.entity.OrderItem.BottleType;
 import com.kabooz.backend.exception.OrderNotFoundException;
 import com.kabooz.backend.repository.CustomerRepository;
@@ -31,22 +32,26 @@ import java.util.List;
 
 /**
  * Service handling all order lifecycle operations:
- * creation (public + admin), retrieval, status updates, and soft deletion.
+ * creation (public + admin), review (accept/reject), retrieval,
+ * status updates, and soft deletion.
  */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class OrderService {
 
-    private final OrderRepository       orderRepository;
-    private final CustomerRepository    customerRepository;
+    private final OrderRepository          orderRepository;
+    private final CustomerRepository       customerRepository;
     private final InvoiceCounterRepository invoiceCounterRepository;
-    private final PricingService        pricingService;
+    private final PricingService           pricingService;
 
     // ── Public — Place order ───────────────────────────────────────────────
 
     /**
      * Create a new order from the public homepage.
+     * Public orders bypass the review workflow and go straight to ACCEPTED
+     * (they are created by the public — no admin review needed since the
+     * admin already validates incoming orders via the new-orders queue).
      * Pricing is fully recalculated server-side; frontend totals are ignored.
      * Customers are upserted by mobile number.
      *
@@ -66,9 +71,8 @@ public class OrderService {
                 null
         );
 
-        // Build order
+        // Build order — public orders enter PENDING_REVIEW, invoiceNo assigned on accept
         Order order = Order.builder()
-                .invoiceNo(nextInvoiceNumber())
                 .invoiceDate(LocalDate.now())
                 .dueDate(LocalDate.now().plusDays(30))
                 .customer(customer)
@@ -78,6 +82,7 @@ public class OrderService {
                 .gstNumber(null)
                 .source(OrderSource.HOMEPAGE)
                 .status(OrderStatus.PENDING)
+                .reviewStatus(ReviewStatus.PENDING_REVIEW)
                 .build();
 
         // Build and price items
@@ -98,11 +103,11 @@ public class OrderService {
 
         aggregateOrderTotals(order);
         Order saved = orderRepository.save(order);
-        log.info("Public order saved: invoiceNo={} grandTotal={}", saved.getInvoiceNo(), saved.getGrandTotal());
+        log.info("Public order saved: id={} grandTotal={}", saved.getId(), saved.getGrandTotal());
 
         return PlaceOrderResponse.builder()
                 .id(saved.getId())
-                .invoiceNo(saved.getInvoiceNo())
+                .invoiceNo(saved.getInvoiceNo()) // null until accepted
                 .grandTotal(saved.getGrandTotal())
                 .status(saved.getStatus().name())
                 .message("Order placed successfully! We will contact you shortly.")
@@ -112,11 +117,12 @@ public class OrderService {
     // ── Admin — Create order ───────────────────────────────────────────────
 
     /**
-     * Create a new order from the admin panel.
+     * Create a new order from the admin panel in PENDING_REVIEW state.
+     * No invoice number is assigned yet — admin must call acceptOrder to finalise.
      * Admin may set any valid price; the {@code receivedAmount} and {@code dueDate} are honoured.
      *
      * @param req the validated admin order request
-     * @return full order response
+     * @return full order response (reviewStatus = PENDING_REVIEW, invoiceNo = null)
      */
     @Transactional
     public OrderResponse createAdminOrder(AdminOrderRequest req) {
@@ -148,9 +154,8 @@ public class OrderService {
                 ? req.getDueDate()
                 : LocalDate.now().plusDays(30);
 
-
+        // No invoiceNo assigned — that happens on accept
         Order order = Order.builder()
-                .invoiceNo(nextInvoiceNumber())
                 .invoiceDate(LocalDate.now())
                 .dueDate(dueDate)
                 .customer(customer)
@@ -163,6 +168,7 @@ public class OrderService {
                 .gstNumber(gstNumber)
                 .source(OrderSource.ADMIN)
                 .status(OrderStatus.PENDING)
+                .reviewStatus(ReviewStatus.PENDING_REVIEW)
                 .build();
 
         for (AdminOrderRequest.OrderItemRequest itemReq : req.getItems()) {
@@ -179,11 +185,75 @@ public class OrderService {
 
         aggregateOrderTotals(order);
 
-        // Auto-set status based on received amount
+        Order saved = orderRepository.save(order);
+        log.info("Admin order created (pending review): id={}", saved.getId());
+        return toOrderResponse(saved);
+    }
+
+    // ── Admin — Accept order ───────────────────────────────────────────────
+
+    /**
+     * Accept a pending-review order.
+     * Assigns an invoice number and transitions reviewStatus → ACCEPTED.
+     * Auto-sets payment status based on received amount.
+     *
+     * @param id the order ID
+     * @return updated full order response (reviewStatus = ACCEPTED, invoiceNo set)
+     * @throws OrderNotFoundException   if order not found
+     * @throws IllegalStateException    if order is not in PENDING_REVIEW state
+     */
+    @Transactional
+    public OrderResponse acceptOrder(Long id) {
+        Order order = orderRepository.findActiveById(id)
+                .orElseThrow(() -> new OrderNotFoundException(id));
+
+        if (order.getReviewStatus() != ReviewStatus.PENDING_REVIEW) {
+            throw new IllegalStateException(
+                    "Order " + id + " is already " + order.getReviewStatus().name().toLowerCase()
+                            + " and cannot be accepted again.");
+        }
+
+        // Assign invoice number and mark as accepted
+        order.setInvoiceNo(nextInvoiceNumber());
+        order.setReviewStatus(ReviewStatus.ACCEPTED);
+
+        // Auto-set payment status based on received amount
         autoSetStatus(order);
 
         Order saved = orderRepository.save(order);
-        log.info("Admin order saved: invoiceNo={}", saved.getInvoiceNo());
+        log.info("Order {} accepted → invoiceNo={}", id, saved.getInvoiceNo());
+        return toOrderResponse(saved);
+    }
+
+    // ── Admin — Reject order ───────────────────────────────────────────────
+
+    /**
+     * Reject a pending-review order.
+     * Sets reviewStatus → REJECTED and stores the optional reason.
+     * No invoice number is assigned.
+     *
+     * @param id     the order ID
+     * @param reason optional rejection reason (may be null or blank)
+     * @return updated full order response (reviewStatus = REJECTED, invoiceNo = null)
+     * @throws OrderNotFoundException if order not found
+     * @throws IllegalStateException  if order is not in PENDING_REVIEW state
+     */
+    @Transactional
+    public OrderResponse rejectOrder(Long id, String reason) {
+        Order order = orderRepository.findActiveById(id)
+                .orElseThrow(() -> new OrderNotFoundException(id));
+
+        if (order.getReviewStatus() != ReviewStatus.PENDING_REVIEW) {
+            throw new IllegalStateException(
+                    "Order " + id + " is already " + order.getReviewStatus().name().toLowerCase()
+                            + " and cannot be rejected again.");
+        }
+
+        order.setReviewStatus(ReviewStatus.REJECTED);
+        order.setRejectionReason(reason != null && !reason.isBlank() ? reason.trim() : null);
+
+        Order saved = orderRepository.save(order);
+        log.info("Order {} rejected. Reason: {}", id, saved.getRejectionReason());
         return toOrderResponse(saved);
     }
 
@@ -192,14 +262,15 @@ public class OrderService {
     /**
      * List all active (non-deleted) orders with optional filtering and pagination.
      *
-     * @param page   0-based page number
-     * @param size   page size (default 20)
-     * @param status optional status filter ("all", "PENDING", "PAID", "OVERDUE")
-     * @param search optional free-text search on customer name, mobile, or invoice number
+     * @param page         0-based page number
+     * @param size         page size (default 20)
+     * @param status       optional payment status filter: "all" | "PENDING" | "PAID" | "OVERDUE"
+     * @param reviewStatus optional review status filter: "all" | "PENDING_REVIEW" | "ACCEPTED" | "REJECTED"
+     * @param search       optional free-text search on customer name, mobile, or invoice number
      * @return paginated order summaries
      */
     @Transactional(readOnly = true)
-    public Page<OrderSummaryResponse> listOrders(int page, int size, String status, String search) {
+    public Page<OrderSummaryResponse> listOrders(int page, int size, String status, String reviewStatus, String search) {
         Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
 
         OrderStatus statusFilter = null;
@@ -211,8 +282,17 @@ public class OrderService {
             }
         }
 
+        ReviewStatus reviewStatusFilter = null;
+        if (reviewStatus != null && !reviewStatus.isBlank() && !"all".equalsIgnoreCase(reviewStatus)) {
+            try {
+                reviewStatusFilter = ReviewStatus.valueOf(reviewStatus.toUpperCase());
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("Invalid reviewStatus: " + reviewStatus);
+            }
+        }
+
         String searchTerm = (search != null && !search.isBlank()) ? search : null;
-        Page<Order> orders = orderRepository.findAllActive(statusFilter, searchTerm, pageable);
+        Page<Order> orders = orderRepository.findAllActive(statusFilter, reviewStatusFilter, searchTerm, pageable);
 
         return orders.map(this::toOrderSummary);
     }
@@ -237,6 +317,7 @@ public class OrderService {
 
     /**
      * Update an order's payment status and/or received amount.
+     * Only valid for ACCEPTED orders.
      *
      * @param id  the order ID
      * @param req status + received amount update request
@@ -326,7 +407,7 @@ public class OrderService {
     // ── Admin — Dashboard ──────────────────────────────────────────────────
 
     /**
-     * Aggregate dashboard statistics across all non-deleted orders.
+     * Aggregate dashboard statistics across all non-deleted accepted orders.
      *
      * @return DashboardStatsResponse with totals and this-month metrics
      */
@@ -344,6 +425,7 @@ public class OrderService {
                 .overdueCount(orderRepository.countByStatus(OrderStatus.OVERDUE))
                 .thisMonthOrders(orderRepository.countActiveCreatedAfter(monthStart))
                 .thisMonthRevenue(orZero(orderRepository.sumGrandTotalCreatedAfter(monthStart)))
+                .pendingReviewCount(orderRepository.countPendingReview())
                 .build();
     }
 
@@ -413,7 +495,7 @@ public class OrderService {
     }
 
     /**
-     * Automatically transition order status based on received amount.
+     * Automatically transition order payment status based on received amount.
      *
      * @param order the order (must have grandTotal and receivedAmount set)
      */
@@ -463,6 +545,8 @@ public class OrderService {
                 .dueDate(order.getDueDate())
                 .status(order.getStatus().name())
                 .source(order.getSource().name())
+                .reviewStatus(order.getReviewStatus().name())
+                .rejectionReason(order.getRejectionReason())
                 .notes(order.getNotes())
                 .createdAt(order.getCreatedAt())
                 .customer(OrderResponse.CustomerDto.builder()
@@ -520,6 +604,8 @@ public class OrderService {
                 .gstNumber(order.getGstNumber())
                 .itemCount(itemCount)
                 .createdAt(order.getCreatedAt())
+                .reviewStatus(order.getReviewStatus().name())
+                .rejectionReason(order.getRejectionReason())
                 .build();
     }
 

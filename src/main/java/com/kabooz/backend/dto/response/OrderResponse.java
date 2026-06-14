@@ -13,6 +13,7 @@ import java.util.List;
 /**
  * Full order response including customer details, all line items,
  * and complete tax breakdown. Used for GET /api/admin/orders/{id}.
+ * Also returned by accept/reject actions.
  */
 @Data
 @Builder
@@ -28,6 +29,12 @@ public class OrderResponse {
     private String source;
     private String notes;
     private LocalDateTime createdAt;
+
+    /** Review workflow status: PENDING_REVIEW | ACCEPTED | REJECTED */
+    private String reviewStatus;
+
+    /** Set when reviewStatus = REJECTED */
+    private String rejectionReason;
 
     // ── Customer ──────────────────────────────────────────────────
     private CustomerDto customer;
