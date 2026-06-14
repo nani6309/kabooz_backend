@@ -66,10 +66,13 @@ public class SecurityConfig {
 
             // ── Authorisation rules ────────────────────────────────────
             .authorizeHttpRequests(auth -> auth
+                // Uptime-monitor / health — no auth needed
+                .requestMatchers(HttpMethod.HEAD, "/**").permitAll()
+                .requestMatchers(HttpMethod.GET, "/").permitAll()
+                .requestMatchers("/api/health").permitAll()
                 // Public endpoints
                 .requestMatchers("/api/auth/**").permitAll()
                 .requestMatchers("/api/public/**").permitAll()
-                .requestMatchers("/api/health").permitAll()
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                 // Admin endpoints require authentication
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
